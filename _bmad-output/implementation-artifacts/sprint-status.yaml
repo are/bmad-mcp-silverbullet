@@ -1,5 +1,5 @@
 # generated: 2026-04-30
-# last_updated: 2026-04-30 (story 1.8 → done after code review)
+# last_updated: 2026-05-01 (story 1.9 → done after code-review)
 # project: bmad-silverbullet-mcp
 # project_key: NOKEY
 # tracking_system: file-system
@@ -35,7 +35,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 
 generated: 2026-04-30
-last_updated: 2026-04-30
+last_updated: 2026-05-01
 project: bmad-silverbullet-mcp
 project_key: NOKEY
 tracking_system: file-system
@@ -51,7 +51,7 @@ development_status:
   1-6-domainerror-formatter-and-audit-serializer: done
   1-7-silverbullet-runtime-client-and-latency-baseline: done
   1-8-permission-engine-and-mcp-config-block-parser: done
-  1-9-freshness-state-module: backlog
+  1-9-freshness-state-module: done
   1-10-read-side-tool-handlers-list-pages-search-pages-read-page: backlog
   1-11-startup-ladder-and-cooperative-shutdown: backlog
   1-12-ci-workflow-dependabot-and-stdio-discipline-smoke-test: backlog
