@@ -22,7 +22,7 @@ jobs:
       matrix:
         node-version: ['24.x']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node ${{ matrix.node-version }}
         uses: actions/setup-node@v4
