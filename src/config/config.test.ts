@@ -76,8 +76,8 @@ await test('loadConfig: non-localhost http rejected with must_use_https rule', (
   const result = loadConfig(envOf({ SILVERBULLET_URL: 'http://example.com' }));
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'SILVERBULLET_URL');
-    assert.strictEqual(result.error.rule, 'must_use_https');
+    assert.strictEqual(result.error.details.variable, 'SILVERBULLET_URL');
+    assert.strictEqual(result.error.details.rule, 'must_use_https');
   }
 });
 
@@ -86,8 +86,8 @@ await test('loadConfig: missing SILVERBULLET_URL → missing rule', () => {
   const result = loadConfig(env);
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'SILVERBULLET_URL');
-    assert.strictEqual(result.error.rule, 'missing');
+    assert.strictEqual(result.error.details.variable, 'SILVERBULLET_URL');
+    assert.strictEqual(result.error.details.rule, 'missing');
   }
 });
 
@@ -95,8 +95,8 @@ await test('loadConfig: empty SILVERBULLET_URL treated as missing', () => {
   const result = loadConfig(envOf({ SILVERBULLET_URL: '' }));
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'SILVERBULLET_URL');
-    assert.strictEqual(result.error.rule, 'missing');
+    assert.strictEqual(result.error.details.variable, 'SILVERBULLET_URL');
+    assert.strictEqual(result.error.details.rule, 'missing');
   }
 });
 
@@ -105,8 +105,8 @@ await test('loadConfig: missing SILVERBULLET_TOKEN → missing rule', () => {
   const result = loadConfig(env);
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'SILVERBULLET_TOKEN');
-    assert.strictEqual(result.error.rule, 'missing');
+    assert.strictEqual(result.error.details.variable, 'SILVERBULLET_TOKEN');
+    assert.strictEqual(result.error.details.rule, 'missing');
   }
 });
 
@@ -114,8 +114,8 @@ await test('loadConfig: empty SILVERBULLET_TOKEN treated as missing', () => {
   const result = loadConfig(envOf({ SILVERBULLET_TOKEN: '' }));
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'SILVERBULLET_TOKEN');
-    assert.strictEqual(result.error.rule, 'missing');
+    assert.strictEqual(result.error.details.variable, 'SILVERBULLET_TOKEN');
+    assert.strictEqual(result.error.details.rule, 'missing');
   }
 });
 
@@ -123,8 +123,8 @@ await test('loadConfig: malformed URL "not-a-url" → invalid_url rule', () => {
   const result = loadConfig(envOf({ SILVERBULLET_URL: 'not-a-url' }));
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'SILVERBULLET_URL');
-    assert.strictEqual(result.error.rule, 'invalid_url');
+    assert.strictEqual(result.error.details.variable, 'SILVERBULLET_URL');
+    assert.strictEqual(result.error.details.rule, 'invalid_url');
   }
 });
 
@@ -132,8 +132,8 @@ await test('loadConfig: malformed URL "://broken" → invalid_url rule', () => {
   const result = loadConfig(envOf({ SILVERBULLET_URL: '://broken' }));
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'SILVERBULLET_URL');
-    assert.strictEqual(result.error.rule, 'invalid_url');
+    assert.strictEqual(result.error.details.variable, 'SILVERBULLET_URL');
+    assert.strictEqual(result.error.details.rule, 'invalid_url');
   }
 });
 
@@ -141,8 +141,8 @@ await test('loadConfig: relative audit log path rejected', () => {
   const result = loadConfig(envOf({ MCP_SILVERBULLET_AUDIT_LOG_PATH: './audit.jsonl' }));
   assert.strictEqual(result.kind, 'error');
   if (result.kind === 'error') {
-    assert.strictEqual(result.error.variable, 'MCP_SILVERBULLET_AUDIT_LOG_PATH');
-    assert.strictEqual(result.error.rule, 'must_be_absolute_path');
+    assert.strictEqual(result.error.details.variable, 'MCP_SILVERBULLET_AUDIT_LOG_PATH');
+    assert.strictEqual(result.error.details.rule, 'must_be_absolute_path');
   }
 });
 
@@ -193,9 +193,11 @@ const README_HINT =
 await test('formatConfigError: missing SILVERBULLET_URL', () => {
   const err: ConfigError = {
     reason: 'config_error',
-    variable: 'SILVERBULLET_URL',
-    rule: 'missing',
-    message: 'SILVERBULLET_URL is required',
+    details: {
+      variable: 'SILVERBULLET_URL',
+      rule: 'missing',
+      message: 'SILVERBULLET_URL is required',
+    },
   };
   const { fatal, hint } = formatConfigError(err);
   assert.strictEqual(fatal, '[mcp-silverbullet] FATAL: SILVERBULLET_URL is required');
@@ -207,9 +209,11 @@ await test('formatConfigError: missing SILVERBULLET_URL', () => {
 await test('formatConfigError: missing SILVERBULLET_TOKEN', () => {
   const err: ConfigError = {
     reason: 'config_error',
-    variable: 'SILVERBULLET_TOKEN',
-    rule: 'missing',
-    message: 'SILVERBULLET_TOKEN is required',
+    details: {
+      variable: 'SILVERBULLET_TOKEN',
+      rule: 'missing',
+      message: 'SILVERBULLET_TOKEN is required',
+    },
   };
   const { fatal, hint } = formatConfigError(err);
   assert.strictEqual(fatal, '[mcp-silverbullet] FATAL: SILVERBULLET_TOKEN is required');
@@ -219,9 +223,11 @@ await test('formatConfigError: missing SILVERBULLET_TOKEN', () => {
 await test('formatConfigError: invalid URL syntax', () => {
   const err: ConfigError = {
     reason: 'config_error',
-    variable: 'SILVERBULLET_URL',
-    rule: 'invalid_url',
-    message: 'SILVERBULLET_URL must be a valid URL',
+    details: {
+      variable: 'SILVERBULLET_URL',
+      rule: 'invalid_url',
+      message: 'SILVERBULLET_URL must be a valid URL',
+    },
   };
   const { fatal, hint } = formatConfigError(err);
   assert.strictEqual(fatal, '[mcp-silverbullet] FATAL: SILVERBULLET_URL must be a valid URL');
@@ -234,9 +240,11 @@ await test('formatConfigError: invalid URL syntax', () => {
 await test('formatConfigError: must_use_https mentions localhost exemption', () => {
   const err: ConfigError = {
     reason: 'config_error',
-    variable: 'SILVERBULLET_URL',
-    rule: 'must_use_https',
-    message: 'SILVERBULLET_URL must use https://',
+    details: {
+      variable: 'SILVERBULLET_URL',
+      rule: 'must_use_https',
+      message: 'SILVERBULLET_URL must use https://',
+    },
   };
   const { fatal, hint } = formatConfigError(err);
   assert.strictEqual(
@@ -252,9 +260,11 @@ await test('formatConfigError: must_use_https mentions localhost exemption', () 
 await test('formatConfigError: must_be_non_empty token', () => {
   const err: ConfigError = {
     reason: 'config_error',
-    variable: 'SILVERBULLET_TOKEN',
-    rule: 'must_be_non_empty',
-    message: 'SILVERBULLET_TOKEN must be non-empty',
+    details: {
+      variable: 'SILVERBULLET_TOKEN',
+      rule: 'must_be_non_empty',
+      message: 'SILVERBULLET_TOKEN must be non-empty',
+    },
   };
   const { fatal, hint } = formatConfigError(err);
   assert.strictEqual(fatal, '[mcp-silverbullet] FATAL: SILVERBULLET_TOKEN must be non-empty');
@@ -264,9 +274,11 @@ await test('formatConfigError: must_be_non_empty token', () => {
 await test('formatConfigError: must_be_absolute_path audit log', () => {
   const err: ConfigError = {
     reason: 'config_error',
-    variable: 'MCP_SILVERBULLET_AUDIT_LOG_PATH',
-    rule: 'must_be_absolute_path',
-    message: 'MCP_SILVERBULLET_AUDIT_LOG_PATH must be an absolute path',
+    details: {
+      variable: 'MCP_SILVERBULLET_AUDIT_LOG_PATH',
+      rule: 'must_be_absolute_path',
+      message: 'MCP_SILVERBULLET_AUDIT_LOG_PATH must be an absolute path',
+    },
   };
   const { fatal, hint } = formatConfigError(err);
   assert.strictEqual(
