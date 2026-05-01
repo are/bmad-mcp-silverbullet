@@ -22,6 +22,7 @@
     "test": "node --test 'src/**/*.test.ts' 'tests/integration/**/*.test.ts'",
     "lint": "eslint .",
     "format": "prettier --write .",
+    "latency-baseline": "node ./scripts/latency-baseline.ts",
     "prepublishOnly": "npm run typecheck && npm run lint && npm test"
   },
   "simple-git-hooks": {
