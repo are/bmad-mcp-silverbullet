@@ -1,5 +1,5 @@
 # generated: 2026-04-30
-# last_updated: 2026-04-30 (story 1.5 → review after dev-story complete)
+# last_updated: 2026-04-30 (story 1.6 → done after code-review patches applied)
 # project: bmad-silverbullet-mcp
 # project_key: NOKEY
 # tracking_system: file-system
@@ -48,7 +48,7 @@ development_status:
   1-3-diagnostic-logger: done
   1-4-configuration-module-and-secret-scrubber: done
   1-5-audit-logger-jsonl-ulid-digest-drain: done
-  1-6-domainerror-formatter-and-audit-serializer: backlog
+  1-6-domainerror-formatter-and-audit-serializer: done
   1-7-silverbullet-runtime-client-and-latency-baseline: backlog
   1-8-permission-engine-and-mcp-config-block-parser: backlog
   1-9-freshness-state-module: backlog

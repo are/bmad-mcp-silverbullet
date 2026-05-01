@@ -25,9 +25,13 @@ export type ConfigRule =
   | 'must_be_absolute_path';
 
 /**
- * Local error type for config-validation failures. Structurally compatible
- * with the placeholder `DomainError` (`reason: string`); story 1.6 will
- * reconcile this with the closed `ReasonCode` enum's `config_error` value.
+ * Local error type for config-validation failures, reconciled with the
+ * canonical `DomainError` shape from `src/domain/error.ts` (Story 1.6). The
+ * `reason: 'config_error'` literal is one of the closed `ReasonCode` values;
+ * `variable`, `rule`, and `message` live under `details` to satisfy the
+ * `details: Record<string, unknown>` requirement structurally — making
+ * `Result<Config, ConfigError>` compile against `Result<T, E extends
+ * DomainError>` (`src/domain/result.ts:13-15`).
  *
  * The shape carries enough detail to render the AR39 FATAL+hint format
  * without ever including the user-supplied env value — that's how token
@@ -35,9 +39,14 @@ export type ConfigRule =
  */
 export type ConfigError = {
   readonly reason: 'config_error';
-  readonly variable: 'SILVERBULLET_URL' | 'SILVERBULLET_TOKEN' | 'MCP_SILVERBULLET_AUDIT_LOG_PATH';
-  readonly rule: ConfigRule;
-  readonly message: string;
+  readonly details: {
+    readonly variable:
+      | 'SILVERBULLET_URL'
+      | 'SILVERBULLET_TOKEN'
+      | 'MCP_SILVERBULLET_AUDIT_LOG_PATH';
+    readonly rule: ConfigRule;
+    readonly message: string;
+  };
 };
 
 export type LoadConfigResult = Result<Config, ConfigError>;
@@ -86,58 +95,40 @@ function toFieldKey(pathSegment: PropertyKey | undefined): FieldKey {
     : 'silverbulletUrl';
 }
 
+function makeConfigError(
+  variable: ConfigError['details']['variable'],
+  rule: ConfigRule,
+  message: string,
+): ConfigError {
+  return { reason: 'config_error', details: { variable, rule, message } };
+}
+
 function issueToConfigError(issue: z.core.$ZodIssue): ConfigError {
   const fieldKey = toFieldKey(issue.path[0]);
   const variable = ENV_KEYS[fieldKey];
 
   if (issue.code === 'invalid_type') {
-    return {
-      reason: 'config_error',
-      variable,
-      rule: 'missing',
-      message: `${variable} is required`,
-    };
+    return makeConfigError(variable, 'missing', `${variable} is required`);
   }
   if (issue.code === 'too_small' && fieldKey === 'silverbulletToken') {
-    return {
-      reason: 'config_error',
-      variable,
-      rule: 'must_be_non_empty',
-      message: `${variable} must be non-empty`,
-    };
+    return makeConfigError(variable, 'must_be_non_empty', `${variable} must be non-empty`);
   }
   if (issue.code === 'invalid_format' && fieldKey === 'silverbulletUrl') {
-    return {
-      reason: 'config_error',
-      variable,
-      rule: 'invalid_url',
-      message: `${variable} must be a valid URL`,
-    };
+    return makeConfigError(variable, 'invalid_url', `${variable} must be a valid URL`);
   }
   if (issue.code === 'custom') {
     if (fieldKey === 'silverbulletUrl') {
-      return {
-        reason: 'config_error',
-        variable,
-        rule: 'must_use_https',
-        message: `${variable} must use https://`,
-      };
+      return makeConfigError(variable, 'must_use_https', `${variable} must use https://`);
     }
     if (fieldKey === 'auditLogPath') {
-      return {
-        reason: 'config_error',
+      return makeConfigError(
         variable,
-        rule: 'must_be_absolute_path',
-        message: `${variable} must be an absolute path`,
-      };
+        'must_be_absolute_path',
+        `${variable} must be an absolute path`,
+      );
     }
   }
-  return {
-    reason: 'config_error',
-    variable,
-    rule: 'missing',
-    message: `${variable} is invalid`,
-  };
+  return makeConfigError(variable, 'missing', `${variable} is invalid`);
 }
 
 function pickPrimaryIssue(issues: readonly z.core.$ZodIssue[]): z.core.$ZodIssue | undefined {
@@ -202,12 +193,7 @@ export function loadConfig(env: Record<string, string | undefined>): LoadConfigR
     // Defensive: zod's safeParse always emits at least one issue on
     // failure. Surface a generic config_error if that invariant is ever
     // violated rather than throwing.
-    const fallback: ConfigError = {
-      reason: 'config_error',
-      variable: 'SILVERBULLET_URL',
-      rule: 'missing',
-      message: 'configuration is invalid',
-    };
+    const fallback = makeConfigError('SILVERBULLET_URL', 'missing', 'configuration is invalid');
     return err(fallback);
   }
   return err(issueToConfigError(issue));
@@ -222,31 +208,32 @@ export function loadConfig(env: Record<string, string | undefined>): LoadConfigR
 export function formatConfigError(err: ConfigError): { fatal: string; hint: string } {
   const README_HINT =
     '[mcp-silverbullet] hint: see the project README — Configuration / Environment variables';
-  switch (err.rule) {
+  const { variable, rule } = err.details;
+  switch (rule) {
     case 'missing':
       return {
-        fatal: `[mcp-silverbullet] FATAL: ${err.variable} is required`,
+        fatal: `[mcp-silverbullet] FATAL: ${variable} is required`,
         hint: README_HINT,
       };
     case 'invalid_url':
       return {
-        fatal: `[mcp-silverbullet] FATAL: ${err.variable} must be a valid URL`,
-        hint: `[mcp-silverbullet] hint: ${err.variable} must parse as an absolute URL (e.g. https://notes.example.com)`,
+        fatal: `[mcp-silverbullet] FATAL: ${variable} must be a valid URL`,
+        hint: `[mcp-silverbullet] hint: ${variable} must parse as an absolute URL (e.g. https://notes.example.com)`,
       };
     case 'must_use_https':
       return {
-        fatal: `[mcp-silverbullet] FATAL: ${err.variable} must use https:// (localhost/127.0.0.1 exempt)`,
+        fatal: `[mcp-silverbullet] FATAL: ${variable} must use https:// (localhost/127.0.0.1 exempt)`,
         hint: '[mcp-silverbullet] hint: NFR7 requires https:// for non-local SilverBullet endpoints',
       };
     case 'must_be_non_empty':
       return {
-        fatal: `[mcp-silverbullet] FATAL: ${err.variable} must be non-empty`,
+        fatal: `[mcp-silverbullet] FATAL: ${variable} must be non-empty`,
         hint: README_HINT,
       };
     case 'must_be_absolute_path':
       return {
-        fatal: `[mcp-silverbullet] FATAL: ${err.variable} must be an absolute path`,
-        hint: `[mcp-silverbullet] hint: ${err.variable} must be an absolute filesystem path (e.g. /var/log/mcp-silverbullet/audit.jsonl)`,
+        fatal: `[mcp-silverbullet] FATAL: ${variable} must be an absolute path`,
+        hint: `[mcp-silverbullet] hint: ${variable} must be an absolute filesystem path (e.g. /var/log/mcp-silverbullet/audit.jsonl)`,
       };
   }
 }
