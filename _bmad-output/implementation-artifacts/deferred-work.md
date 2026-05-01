@@ -10,3 +10,7 @@ A running ledger of items that are real but not actionable in the story that sur
 - **`.gitignore` audit-log pattern (`audit.jsonl`) may not match runtime write location** — Story 1.5 lands the audit logger; revisit the ignore pattern when the actual write path (CWD vs. configurable) is fixed.
 - **`.gitignore` missing forward-looking patterns** (`dist/`, `coverage/`, `*.tsbuildinfo`) — No build step, no coverage tooling today. Revisit if either lands.
 - **`lint-staged` glob misses `.editorconfig`, `*.yml`, `*.yaml`** — Minor formatting drift risk on non-`.ts/.js/.json/.md` configs. Tighten when CI / GH workflow YAML lands in Story 1.12.
+
+## Deferred from: code review of story-1-2-ref-domain-primitive (2026-04-30)
+
+- **Per-segment leading `.`/`^` and per-segment `.md` suffix rules** — `makeRef` validator applies leading-`.`/`^` and `.md` suffix rules only at the full-string boundary, so `Foo/.hidden`, `Foo/^bar`, and `Foo.md/Bar` all pass. SB's `Names.md` is per-name not per-segment, so tightening here would diverge from upstream without a documented threat. Revisit if SB's upstream validator changes, if Story 1.8's permission engine treats per-segment dotfiles specially, or if a per-segment exploit surfaces. (`src/domain/ref.ts:58-77`)
