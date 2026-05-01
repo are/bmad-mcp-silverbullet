@@ -35,8 +35,16 @@ class ExitSentinel extends Error {
 }
 
 const unexpectedRejections: unknown[] = [];
-process.on('unhandledRejection', (reason: unknown) => {
+const rejectionHandler = (reason: unknown): void => {
   if (!(reason instanceof ExitSentinel)) unexpectedRejections.push(reason);
+};
+process.on('unhandledRejection', rejectionHandler);
+// Detach at process exit so the listener doesn't leak across multi-file
+// `node --test` runs (each test file IS its own worker today, but the
+// detach makes the contract explicit and survives a future single-process
+// runner config).
+process.once('beforeExit', () => {
+  process.off('unhandledRejection', rejectionHandler);
 });
 
 // ---------------------------------------------------------------------------
@@ -326,14 +334,23 @@ await test('startup ladder: happy path reaches `serving`, registers all 3 tools,
 });
 
 await test('startup ladder: synthetic cold-start completes well under NFR3 (3000ms)', async () => {
-  const h = buildHarness();
-  const startedAt = Date.now();
-  await runServer(h.deps);
-  const elapsed = Date.now() - startedAt;
-  // Synthetic ladder with mocked SB calls should be under 3 seconds. The
-  // assertion is a regression floor — without the mocks we cannot exercise
-  // real-network NFR3 here.
-  assert.ok(elapsed < 3000, `synthetic ladder took ${String(elapsed)} ms (NFR3 budget 3000ms)`);
+  // Mock setTimeout / setImmediate so any accidental sleeps inside the
+  // ladder are visible as enqueued timers — the wall-clock floor below
+  // would otherwise hide them. The mocks are scoped tightly: they cover
+  // only the ladder call and are torn down right after.
+  test.mock.timers.enable({ apis: ['setTimeout', 'setImmediate'] });
+  try {
+    const h = buildHarness();
+    const startedAt = Date.now();
+    await runServer(h.deps);
+    const elapsed = Date.now() - startedAt;
+    // Synthetic ladder with mocked SB calls should be under 3 seconds. The
+    // assertion is a regression floor — without the mocks we cannot exercise
+    // real-network NFR3 here.
+    assert.ok(elapsed < 3000, `synthetic ladder took ${String(elapsed)} ms (NFR3 budget 3000ms)`);
+  } finally {
+    test.mock.timers.reset();
+  }
 });
 
 // ===========================================================================
@@ -423,14 +440,21 @@ await test('startup ladder: missing env exits via loadConfigOrExit (no SB calls 
   assert.strictEqual(h.auditFactoryOpts.length, 0);
 });
 
-await test('startup ladder: audit factory failure exits 1 with FATAL emitted', async () => {
+await test('startup ladder: audit factory failure exits 1 with audit-open FATAL naming MCP_SILVERBULLET_AUDIT_LOG_PATH', async () => {
   const h = buildHarness({ auditFactoryShouldThrow: true });
   await assert.rejects(runServer(h.deps), ExitSentinel);
   assert.deepStrictEqual(h.proc.exitCalls, [1]);
-  // The audit-factory failure routes to `formatStartupError` → default arm
-  // (no `code`); the message includes the underlying error text.
+  // AC9 case #8: audit-open failure emits a distinct FATAL line that names
+  // MCP_SILVERBULLET_AUDIT_LOG_PATH — NOT the SB-themed default arm. (SB is
+  // fine; the failure is local fs/permissions.)
   const fatal = h.logger.error[0]?.message ?? '';
-  assert.match(fatal, /SilverBullet unreachable/);
+  const hint = h.logger.error[1]?.message ?? '';
+  assert.match(fatal, /cannot open audit log/);
+  assert.match(hint, /MCP_SILVERBULLET_AUDIT_LOG_PATH/);
+  // The audit stream was never opened; close() must NOT have been called.
+  // (Future refactor that opens audit before factory-throw is checked would
+  // silently leak without this assertion.)
+  assert.strictEqual(h.audit.closes, 0);
 });
 
 // ===========================================================================
@@ -529,6 +553,52 @@ await test('shutdown: new tool call during draining is rejected with infrastruct
   await h.proc.whenExited;
 });
 
+await test('shutdown: in-flight tool call that REJECTS during draining still settles cleanly, exit(0)', async () => {
+  let rejectExec: ((err: unknown) => void) | undefined;
+  const execGate = new Promise<void>((_, rej) => {
+    rejectExec = rej;
+  });
+  let execCallCount = 0;
+  const h = buildHarness({
+    exec: async <T>(script: string): Promise<T> => {
+      execCallCount += 1;
+      if (execCallCount === 2) await execGate;
+      void script;
+      if (execCallCount === 1) return { blocks: [] } as unknown as T;
+      return { pages: [] } as unknown as T;
+    },
+  });
+  await runServer(h.deps);
+
+  const listPagesEntry = h.server.registeredTools.find((t) => t.name === 'list_pages');
+  assert.ok(listPagesEntry);
+  const inflight = listPagesEntry.callback({}, {});
+
+  // Let the handler reach the gated exec call.
+  await Promise.resolve();
+  await Promise.resolve();
+
+  // Trigger SIGINT — lifecycle flips to draining, awaitInflight starts.
+  h.proc.events.emit('SIGINT');
+  await flushMicrotasks();
+
+  // exit(0) must NOT have fired yet — the in-flight call is still pending.
+  assert.strictEqual(h.proc.exitCalls.length, 0);
+
+  // Reject the gate; the in-flight handler converts the rejection to a
+  // tool-error result. `awaitInflight` uses Promise.allSettled, so the
+  // rejection does NOT cause the shutdown sequence to abort — exit code
+  // stays 0.
+  rejectExec?.(new Error('inflight exec failed'));
+  await inflight;
+  await flushMicrotasks();
+  await h.proc.whenExited;
+
+  assert.deepStrictEqual(h.proc.exitCalls, [0]);
+  assert.strictEqual(h.audit.closes, 1);
+  assert.strictEqual(h.server.closeCalls, 1);
+});
+
 await test('shutdown: in-flight tool call is awaited before exit', async () => {
   let resolveExec: (() => void) | undefined;
   const execGate = new Promise<void>((res) => {
@@ -622,16 +692,34 @@ await test('shutdown: hard-stop force-exits with code 1 if shutdown hangs past 9
 // AC6 — Top-level catch for unhandled exceptions and promise rejections
 // ===========================================================================
 
-await test('top-level uncaughtException: logs ERROR, does NOT exit (NFR12)', async () => {
+await test('top-level uncaughtException: logs ERROR with stack, does NOT exit, lifecycle stays serving (NFR12)', async () => {
   const h = buildHarness();
   await runServer(h.deps);
 
   // Fire the uncaughtException listener directly.
-  h.proc.events.emit('uncaughtException', new Error('boom'));
+  const boom = new Error('boom');
+  h.proc.events.emit('uncaughtException', boom);
   await flushMicrotasks();
 
   assert.strictEqual(h.proc.exitCalls.length, 0, 'NFR12 — must not exit');
-  assert.ok(h.logger.error.some((e) => /uncaughtException: boom/.test(e.message)));
+  // The error was logged with the original Error object as the second arg
+  // (so the diagnostic logger can render the stack trace).
+  const errEntry = h.logger.error.find((e) => /uncaughtException: boom/.test(e.message));
+  assert.ok(errEntry, 'expected uncaughtException error entry');
+  assert.strictEqual(
+    errEntry.err,
+    boom,
+    'original Error must be passed through for stack rendering',
+  );
+  // Lifecycle state must remain 'serving' — the read loop is not torn down
+  // by an uncaughtException (per NFR12). We assert this indirectly by
+  // verifying the registered tool is still reachable and is NOT in the
+  // draining short-circuit.
+  const listPagesEntry = h.server.registeredTools.find((t) => t.name === 'list_pages');
+  assert.ok(listPagesEntry, 'list_pages must still be registered');
+  // No draining audit entry should exist — only a successful draining call
+  // would write an audit entry, and we have NOT entered the draining state.
+  assert.strictEqual(h.audit.writes.length, 0);
 });
 
 await test('top-level unhandledRejection: logs ERROR, does NOT exit (NFR12)', async () => {
@@ -660,6 +748,23 @@ await test('shutdown: double signal (SIGINT then SIGTERM) runs sequence once', a
 
   // Each external surface called exactly once.
   assert.deepStrictEqual(h.proc.exitCalls, [0]);
+  assert.strictEqual(h.audit.closes, 1);
+  assert.strictEqual(h.server.closeCalls, 1);
+});
+
+await test('shutdown: stdin error triggers shutdown with stdio-error banner', async () => {
+  const h = buildHarness();
+  await runServer(h.deps);
+
+  // Emit an error event on stdin — without the stdio-error handler, this
+  // would escalate to an uncaughtException that NFR12 swallows, leaving
+  // the read loop dead but the process alive (zombie state).
+  h.stdin.emit('error', new Error('stdin pipe broken'));
+  await flushMicrotasks();
+  await h.proc.whenExited;
+
+  assert.deepStrictEqual(h.proc.exitCalls, [0]);
+  assert.ok(h.logger.info.some((l) => l === 'stdio error; flushing'));
   assert.strictEqual(h.audit.closes, 1);
   assert.strictEqual(h.server.closeCalls, 1);
 });

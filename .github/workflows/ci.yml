@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel in-flight runs when a new commit lands on the same ref — saves
+# runner minutes on force-pushes and PR pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['24.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Format check
+        run: npx prettier --check .
+
+      - name: Lint
+        run: npm run lint -- --max-warnings=0
+
+      - name: Unit + integration tests
+        run: npm test
+
+      - name: Stdout-discipline smoke test
+        run: node --test tests/smoke/stdout-discipline.test.ts
+
+      - name: Verify pack manifest
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > /tmp/pack.json
+          node --input-type=module -e '
+            import fs from "node:fs";
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync("/tmp/pack.json", "utf8"));
+            } catch (err) {
+              console.error("pack manifest unparseable:", err.message);
+              process.exit(1);
+            }
+            if (!Array.isArray(report) || report.length === 0) {
+              console.error("pack manifest empty or not an array");
+              process.exit(1);
+            }
+            const files = report[0].files.map(f => f.path).sort();
+            const disallowedPatterns = [
+              /^tests\//,
+              /\.test\.ts$/,
+              /^\.github\//,
+              /^_bmad/,
+              /^\.claude\//,
+              /^docs\//,
+              /^scripts\//,
+              /\.prettierrc\.json$/,
+              /\.editorconfig$/,
+              /\.gitignore$/,
+              /\.npmignore$/,
+              /\.prettierignore$/,
+              // Match `tsconfig.json` at any depth and any tsconfig variant
+              // (e.g., `tsconfig.build.json`) — the original `^tsconfig\.json$`
+              // missed both nested and variant configs.
+              /(^|\/)tsconfig.*\.json$/,
+              /^eslint\.config\.js$/,
+            ];
+            const offenders = files.filter(f => disallowedPatterns.some(p => p.test(f)));
+            if (offenders.length > 0) {
+              console.error("Pack manifest contains disallowed files:");
+              for (const f of offenders) console.error("  - " + f);
+              process.exit(1);
+            }
+            const required = ["LICENSE", "README.md", "package.json", "src/index.ts"];
+            const missing = required.filter(r => !files.includes(r));
+            if (missing.length > 0) {
+              console.error("Pack manifest missing required files: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.error("Pack manifest OK — " + files.length + " files");
+          '

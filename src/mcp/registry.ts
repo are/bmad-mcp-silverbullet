@@ -34,7 +34,6 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
   formatToolError,
   infrastructureError,
-  type AuditOutcome,
   type DomainError,
   type HandlerContext,
   type ToolResult,
@@ -143,11 +142,19 @@ export function registerTools(opts: RegisterToolsOptions): void {
       async (args: unknown): Promise<CallToolResult> => {
         if (lifecycle.isDraining()) {
           const error = infrastructureError(new Error('server shutting down'));
-          const outcome: AuditOutcome = { decision: 'rejected', error };
-          ctx.audit.write(buildDrainingAuditEntry(def.name, args, error));
+          // The audit logger may already be closed (shutdown sequence
+          // calls `audit.close()` BEFORE `server.close()`, so a draining
+          // call arriving in that window writes into a closed stream).
+          // Wrap to keep the rejection deterministic — the agent-facing
+          // tool error still returns regardless of audit-write outcome.
+          try {
+            ctx.audit.write(buildDrainingAuditEntry(def.name, args, error));
+          } catch (writeErr) {
+            ctx.logger.warn(`audit write during draining failed: ${String(writeErr)}`);
+          }
           // formatToolError returns `{ isError: true, content: [...] }` —
           // structurally equivalent to the SDK's `CallToolResult`.
-          return formatToolError(outcome.error) as CallToolResult;
+          return formatToolError(error) as CallToolResult;
         }
         const result = await lifecycle.trackInflight(def.handler(args, ctx));
         return result as CallToolResult;

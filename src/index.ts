@@ -25,8 +25,9 @@
  * @see NFR12 — per-call failure does not poison the session (`epics.md:86`).
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -169,6 +170,9 @@ function createLifecycle(): Lifecycle {
       return state;
     },
     transitionToServing(): void {
+      if (state !== 'starting') {
+        throw new Error(`transitionToServing: expected state 'starting', got '${state}'`);
+      }
       state = 'serving';
     },
     transitionToShutdown(): void {
@@ -200,7 +204,8 @@ function formatStartupError(
 ): { fatal: string; hint: string } {
   const domainErr: DomainError = isDomainError(err) ? err : infrastructureError(err);
   const details = domainErr.details;
-  const code = typeof details['code'] === 'string' ? details['code'] : undefined;
+  const code =
+    typeof details['code'] === 'string' && details['code'] !== '' ? details['code'] : undefined;
 
   const url = context.silverbulletUrl ?? '<SILVERBULLET_URL>';
 
@@ -276,8 +281,31 @@ function extractUnderlyingMessage(details: Readonly<Record<string, unknown>>): s
     const safe = scrubSecrets(underlying);
     return truncate(JSON.stringify(safe), 200);
   } catch {
-    return 'SilverBullet unreachable';
+    return 'unable to render error details';
   }
+}
+
+/**
+ * Audit-open failure formatter — distinct from `formatStartupError` so the
+ * operator sees `MCP_SILVERBULLET_AUDIT_LOG_PATH` rather than the misleading
+ * "SilverBullet unreachable" default arm. The audit-factory failure is a
+ * local fs/permissions issue and has nothing to do with SilverBullet's
+ * reachability (AC9 case #8 / AR39).
+ */
+function formatAuditOpenError(err: unknown): { fatal: string; hint: string } {
+  const message =
+    err instanceof Error ? err.message : typeof err === 'string' ? err : 'unknown error';
+  return {
+    fatal: '[mcp-silverbullet] FATAL: cannot open audit log',
+    hint: `[mcp-silverbullet] hint: check MCP_SILVERBULLET_AUDIT_LOG_PATH and that the directory is writable (${truncate(message, 200)})`,
+  };
+}
+
+function fatalExitAudit(err: unknown, deps: StartupDeps): never {
+  const { fatal, hint } = formatAuditOpenError(err);
+  deps.logger.error(fatal);
+  deps.logger.error(hint);
+  return deps.process.exit(1);
 }
 
 function truncate(s: string, max: number): string {
@@ -330,8 +358,23 @@ export async function runServer(deps: StartupDeps): Promise<void> {
     audit = opened.logger;
     auditFilePath = opened.filePath;
   } catch (err) {
-    fatalExit(err, { silverbulletUrl: config.silverbulletUrl }, deps);
+    fatalExitAudit(err, deps);
   }
+
+  // Install minimal startup-abort handlers covering steps 4–6. Without these,
+  // a SIGINT/SIGTERM during the audit-open → connect window terminates via
+  // Node's default handler, leaking the audit stream that step 3 just opened.
+  // Replaced by the full `installShutdownTriggers` once the lifecycle reaches
+  // 'serving'.
+  const startupAbortHandler = (): void => {
+    deps.logger.warn('startup aborted by signal');
+    void safeAuditClose(audit, deps.logger).then(
+      () => deps.process.exit(1),
+      () => deps.process.exit(1),
+    );
+  };
+  deps.process.on('SIGINT', startupAbortHandler);
+  deps.process.on('SIGTERM', startupAbortHandler);
 
   // Step 4 + 5: SB liveness + Runtime-API probe. Both errors route through
   // the same AR39 mapping; the ladder distinguishes only by `details.code`.
@@ -340,6 +383,8 @@ export async function runServer(deps: StartupDeps): Promise<void> {
   try {
     await client.ping();
   } catch (err) {
+    deps.process.off('SIGINT', startupAbortHandler);
+    deps.process.off('SIGTERM', startupAbortHandler);
     await safeAuditClose(audit, deps.logger);
     fatalExit(err, { silverbulletUrl: config.silverbulletUrl }, deps);
   }
@@ -347,6 +392,8 @@ export async function runServer(deps: StartupDeps): Promise<void> {
   try {
     await client.probe();
   } catch (err) {
+    deps.process.off('SIGINT', startupAbortHandler);
+    deps.process.off('SIGTERM', startupAbortHandler);
     await safeAuditClose(audit, deps.logger);
     fatalExit(err, { silverbulletUrl: config.silverbulletUrl }, deps);
   }
@@ -354,6 +401,11 @@ export async function runServer(deps: StartupDeps): Promise<void> {
   deps.logger.info('connected — runtime API ok');
 
   // Step 6: build HandlerContext, register tools, connect transport.
+  // The transport-setup block is wrapped because `mcpServerFactory`,
+  // `registerTools`, `stdioTransportFactory`, and `server.connect` can each
+  // throw — without this guard, a throw escapes to the top-level
+  // `void runServer(...)` invocation with no AR39 FATAL emitted and the
+  // audit stream still open.
   const ctx: HandlerContext = {
     client,
     permissionEngine: defaultPermissionEngine,
@@ -363,17 +415,28 @@ export async function runServer(deps: StartupDeps): Promise<void> {
     clock: deps.clock,
   };
   const lifecycle = createLifecycle();
-  const server = deps.mcpServerFactory({ name: 'mcp-silverbullet', version: SERVER_VERSION });
-  registerTools({ server, ctx, lifecycle: lifecycle.handle });
-  const transport = deps.stdioTransportFactory();
-  await server.connect(transport);
+  let server: McpServer;
+  try {
+    server = deps.mcpServerFactory({ name: 'mcp-silverbullet', version: SERVER_VERSION });
+    registerTools({ server, ctx, lifecycle: lifecycle.handle });
+    const transport = deps.stdioTransportFactory();
+    await server.connect(transport);
+  } catch (err) {
+    deps.process.off('SIGINT', startupAbortHandler);
+    deps.process.off('SIGTERM', startupAbortHandler);
+    await safeAuditClose(audit, deps.logger);
+    fatalExit(err, { silverbulletUrl: config.silverbulletUrl }, deps);
+  }
 
   lifecycle.transitionToServing();
   deps.logger.info(`ready (transport=stdio, audit=${auditFilePath})`);
 
-  // Wire signal handlers + stdin-close listeners + top-level exception
-  // handlers. The shutdown closure captures `deps`, `audit`, `server`, and
-  // `lifecycle` so each trigger calls the same sequence.
+  // Swap startup-abort signal handlers for the real cooperative-shutdown
+  // triggers. The off-then-on dance has a synchronous gap; signals during
+  // that gap fall to Node's default handler — acceptable, since both states
+  // would have terminated the process anyway.
+  deps.process.off('SIGINT', startupAbortHandler);
+  deps.process.off('SIGTERM', startupAbortHandler);
   installShutdownTriggers({ deps, audit, server, lifecycle });
   installTopLevelCatches(deps);
 }
@@ -382,13 +445,15 @@ export async function runServer(deps: StartupDeps): Promise<void> {
 // Shutdown sequence (AR51) + hard-stop timer (AR51 / 900 ms).
 // ---------------------------------------------------------------------------
 
-type ShutdownReason = 'stdio-end' | 'stdio-close' | 'SIGINT' | 'SIGTERM';
+type ShutdownReason = 'stdio-end' | 'stdio-close' | 'stdio-error' | 'SIGINT' | 'SIGTERM';
 
 function bannerFor(reason: ShutdownReason): string {
   switch (reason) {
     case 'stdio-end':
     case 'stdio-close':
       return 'stdio closed';
+    case 'stdio-error':
+      return 'stdio error';
     case 'SIGINT':
       return 'received SIGINT';
     case 'SIGTERM':
@@ -421,26 +486,38 @@ function installShutdownTriggers(opts: ShutdownContext): void {
     opts.lifecycle.markDraining();
 
     // Async work in a fire-and-forget IIFE; signal handlers must be sync.
-    // The `process.exit` call is OUTSIDE the try/catch — a successful shutdown
-    // is genuinely terminal in production (real `process.exit(0)` halts), and
-    // keeping it out of the catch prevents a test-injected `exit` that throws
-    // from being recursively re-caught and re-firing as `exit(1)`.
+    // Each step has its own try/catch so that a failure in one (e.g.,
+    // `audit.close()` rejecting) does NOT skip the remaining cleanup
+    // (`closeRuntime`, `server.close`). Per AC4 step 6, transport-close
+    // failures are logged at WARN but do NOT bump the exit code; the other
+    // cooperative steps DO bump exit code on failure.
     void (async () => {
       let exitCode = 0;
       try {
         await opts.lifecycle.awaitInflight();
-        await opts.audit.close();
-        // closeRuntime hook — no-op for now; future AbortController seam
-        // when `deferred-work.md`'s fetch-timeout work lands.
-        await closeRuntime();
-        try {
-          await opts.server.close();
-        } catch (closeErr) {
-          opts.deps.logger.warn(`mcp transport close failed: ${stringifyError(closeErr)}`);
-        }
       } catch (asyncErr) {
-        opts.deps.logger.warn(`shutdown sequence error: ${stringifyError(asyncErr)}`);
+        opts.deps.logger.warn(`shutdown awaitInflight error: ${stringifyError(asyncErr)}`);
         exitCode = 1;
+      }
+      try {
+        await opts.audit.close();
+      } catch (asyncErr) {
+        opts.deps.logger.warn(`audit close failed: ${stringifyError(asyncErr)}`);
+        exitCode = 1;
+      }
+      // closeRuntime hook — no-op for now; future AbortController seam
+      // when `deferred-work.md`'s fetch-timeout work lands.
+      try {
+        await closeRuntime();
+      } catch (asyncErr) {
+        opts.deps.logger.warn(`closeRuntime failed: ${stringifyError(asyncErr)}`);
+        exitCode = 1;
+      }
+      try {
+        await opts.server.close();
+      } catch (closeErr) {
+        opts.deps.logger.warn(`mcp transport close failed: ${stringifyError(closeErr)}`);
+        // Per spec AC4 step 6: transport-close failure does NOT bump exit code.
       }
       opts.lifecycle.transitionToShutdown();
       opts.deps.logger.info('shutdown complete');
@@ -461,6 +538,13 @@ function installShutdownTriggers(opts: ShutdownContext): void {
   });
   opts.deps.stdin.once('close', () => {
     shutdown('stdio-close');
+  });
+  // stdin 'error' must trigger shutdown — without this, an error event
+  // escalates to `uncaughtException`, which `installTopLevelCatches` logs
+  // but does NOT exit on (NFR12), leaving the read loop dead but the
+  // process alive.
+  opts.deps.stdin.on('error', () => {
+    shutdown('stdio-error');
   });
   opts.deps.process.on('SIGINT', () => {
     shutdown('SIGINT');
@@ -574,16 +658,23 @@ export const productionDeps: StartupDeps = {
 
 // ---------------------------------------------------------------------------
 // main() — runs only when this module is the process entry point.
-// ESM has no `require.main`; the `import.meta.url` comparison is the
-// equivalent. The `endsWith` fallback covers symlinks and the `bin` shim.
+// ESM has no `require.main`; resolve both sides to absolute filesystem paths
+// (with symlinks resolved) and compare. Handles `node ./src/index.ts`, the
+// `npx`/`bin` symlink shim, and Windows path separators.
 // ---------------------------------------------------------------------------
 
-const argv1 = process.argv[1];
-const isEntryPoint =
-  argv1 !== undefined &&
-  (import.meta.url === `file://${argv1}` ||
-    import.meta.url === argv1 ||
-    import.meta.url.endsWith(argv1));
+const isEntryPoint = ((): boolean => {
+  const argv1 = process.argv[1];
+  if (argv1 === undefined) return false;
+  try {
+    const modulePath = fileURLToPath(import.meta.url);
+    const argPath = path.resolve(argv1);
+    if (modulePath === argPath) return true;
+    return realpathSync(modulePath) === realpathSync(argPath);
+  } catch {
+    return false;
+  }
+})();
 
 if (isEntryPoint) {
   void runServer(productionDeps);
