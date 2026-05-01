@@ -1,6 +1,6 @@
 # Story 1.11: Startup Ladder & Cooperative Shutdown
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -50,7 +50,7 @@ So that misconfiguration produces actionable errors immediately and the server n
 | `'ENOTFOUND'` (native errno) | `[mcp-silverbullet] FATAL: SilverBullet hostname did not resolve` | `[mcp-silverbullet] hint: check SILVERBULLET_URL` |
 | any other or absent | `[mcp-silverbullet] FATAL: SilverBullet unreachable` | `[mcp-silverbullet] hint: <details.underlying.message slice 200 chars>` (scrubbed by `infrastructureError`) |
 
-**And** the `<status>` placeholder in `'EBADSTATUS'` is read from `details.status` (the runtime client populates this on non-2xx); fall back to the literal `???` if absent.
+**And** the `<status>` placeholder in `'EBADSTATUS'` is read from `details.underlying.status` (Story 1.6's `infrastructureError` nests the original payload under `details.underlying`; the runtime client puts `status` on that wrapped object on non-2xx). Fall back to the literal `???` if absent.
 
 **And** the `<SILVERBULLET_URL>` placeholder uses `config.silverbulletUrl` — the URL is NOT a secret per NFR5 (only the token is). The token is NEVER inserted into any FATAL or hint line.
 
@@ -84,7 +84,7 @@ So that misconfiguration produces actionable errors immediately and the server n
 
 **And** signal handlers and stream listeners are installed AFTER step 6 of the startup ladder — installing them earlier risks racing the audit logger's open and would require synthetic state-machine handling for the "shutdown signal arrived during startup" edge.
 
-**And** all four trigger paths (`stdin end`, `stdin close`, `SIGINT`, `SIGTERM`) call the same shutdown function. The diagnostic-banner WORD differs per trigger: `'stdio closed'` for stream-end; `'received SIGINT'` / `'received SIGTERM'` for signals.
+**And** all five trigger paths (`stdin end`, `stdin close`, `stdin error`, `SIGINT`, `SIGTERM`) call the same shutdown function. The diagnostic-banner WORD differs per trigger: `'stdio closed'` for stream-end / stream-close; `'stdio error'` for stream-error (added per code-review finding — without this listener a stdin error escalates to `uncaughtException` which `installTopLevelCatches` swallows per NFR12, leaving the read loop dead and the process zombie); `'received SIGINT'` / `'received SIGTERM'` for signals.
 
 **AC5 — Hard-stop force-exit at ~900 ms if shutdown hangs (AR51)**
 
@@ -217,7 +217,7 @@ type LifecycleState = 'starting' | 'serving' | 'draining' | 'shutdown';
 5. `EBADSTATUS`: mocked `client.ping()` rejects with `infrastructureError({ code: 'EBADSTATUS', status: 500 })`; assert FATAL line includes `'HTTP 500'`.
 6. `ECONNREFUSED`: mocked `client.ping()` rejects with `infrastructureError(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }))`; assert FATAL line names the SB URL.
 7. Missing env: empty env → `loadConfigOrExit` calls `exitFn(1)` (already pinned by Story 1.4's tests; this case re-asserts at the ladder level that we surface the failure rather than swallow it).
-8. Malformed audit path: env's `MCP_SILVERBULLET_AUDIT_LOG_PATH` points at an unwritable directory (e.g., a path under a `mkdirSync`-failing fake fs); assert ladder exits 1 with a stderr line that names the variable. (Use a fake `mkdirSync` injected via dependency-injection — see AC10.)
+8. Malformed audit path: env's `MCP_SILVERBULLET_AUDIT_LOG_PATH` points at an unwritable directory (e.g., a path under a `mkdirSync`-failing fake fs); assert ladder exits 1 with a distinct audit-open FATAL line (`'cannot open audit log'`) and a hint that names `MCP_SILVERBULLET_AUDIT_LOG_PATH`. The audit-open failure is routed through `formatAuditOpenError` rather than `formatStartupError`'s default arm — SB is fine; the failure is local fs/permissions, and the operator-facing message must reflect that. (Use a fake `mkdirSync` injected via dependency-injection — see AC10.)
 
 **Cooperative shutdown (AC4, AC5):**
 
@@ -560,6 +560,49 @@ export type StartupDeps = {
 - [x] **Task 7: Append deferred-work entries (post-implementation review)** (housekeeping)
   - [x] Append entries that surface during the implementation pass — particularly: (a) the `closeRuntime` hook is empty for now; revisit once `AbortController` lands per `deferred-work.md:27`, (b) the hard-stop timer's `process.exit(1)` may leak the audit-stream's last buffered line — operationally acceptable (force-exit is by definition degraded) but documenting the trade-off, (c) the lifecycle's `state` is intentionally not exposed via the MCP tool surface (NFR8); revisit if a future health-check tool is added, (d) any other discoveries.
   - [x] Cross-reference Story 1.12 (CI workflow + smoke test) — the stdio-discipline smoke test will exercise this story's startup ladder in a real subprocess.
+
+### Review Findings
+
+**Code review 2026-05-01 (post-commit `1818a44`).** 3-layer adversarial review (Blind Hunter, Edge Case Hunter, Acceptance Auditor). Initial verdict: routes back to dev — 6 BLOCKER patches plus 2 AC-deviation decisions. **All decisions resolved and all patches applied in the same review session** (typecheck + lint + 461/461 tests green). AC11 manifest gate verified via `npm pack --dry-run` — 29 files, matching spec.
+
+**Decision needed**
+
+- [x] [Review][Decision] **AC2 EBADSTATUS reads `details.underlying.status` not `details.status`** — Spec quote: "the `<status>` placeholder in `'EBADSTATUS'` is read from `details.status`." Implementation at `src/index.ts:222-228` reads `details.underlying.status` because `infrastructureError` nests the wrapped object under `details.underlying`. Either the spec wording is loose (and the impl is right given how `infrastructureError` actually shapes its output), or the impl should normalize `details.status` at the wrap site. Affects production behavior on any non-2xx during the ping/probe ladder.
+- [x] [Review][Decision] **Audit-factory failure produces misleading "FATAL: SilverBullet unreachable"** — `formatStartupError` default arm fires for an audit-open failure (path / permissions / disk), routing it through the SB-themed default arm. AC9 case #8 explicitly demands the FATAL line "names the variable `MCP_SILVERBULLET_AUDIT_LOG_PATH`." Test at `tests/integration/startup-ladder.test.ts:432-433` affirms the misleading message. Either add a distinct error category for audit-open failures (preserves AR39 spirit + AC9 case #8) or accept the divergence and amend the spec.
+
+**Patch — blocker**
+
+- [x] [Review][Patch] **Unguarded `mcpServerFactory` / `registerTools` / `stdioTransportFactory` / `server.connect()`** [`src/index.ts:366-369`] — Throws here propagate to the bottom-of-file `void runServer(productionDeps)` (no `.catch`); `installTopLevelCatches` is not yet installed. Audit stream leaks open, no AR39 FATAL emitted, Node's default unhandled-rejection terminates with the audit file mid-write. Wrap in try/catch → `safeAuditClose(audit, …)` + `fatalExit(err, { silverbulletUrl }, deps)`.
+- [x] [Review][Patch] **No signal handler during the startup ladder (steps 3–6)** [`src/index.ts:303-378`] — `installShutdownTriggers` runs at line 377 (after `server.connect`). A SIGINT/SIGTERM during steps 3–6 hits Node's default handler and terminates with the audit stream opened at step 3 still buffered. Install a temporary die-on-signal handler at startup-begin that calls `safeAuditClose` + `process.exit(1)`; replace it at line 377.
+- [x] [Review][Patch] **stdin `'error'` events have no listener; `installTopLevelCatches` swallows them silently** [`src/index.ts:459-470`, `src/index.ts:506-517`] — A stdin error escalates to `uncaughtException` → `installTopLevelCatches` logs but does NOT exit (NFR12). Net: read loop dies, process keeps running — zombie state. Add `opts.deps.stdin.on('error', () => shutdown('stdio-error'))` (extend `ShutdownReason` accordingly).
+- [x] [Review][Patch] **`audit.close()` rejection during shutdown skips `closeRuntime` and `server.close`** [`src/index.ts:430-444`] — Outer `catch (asyncErr)` at line 441 fires on audit-close rejection → transport never closes, `closeRuntime` never runs. Move `server.close()` (and `closeRuntime()`) into an outer `finally` or independent try/catch arms so they always run regardless of audit-close outcome.
+- [x] [Review][Patch] **`isEntryPoint` heuristic uses `endsWith` on `import.meta.url`** [`src/index.ts:1638-1646` of diff] — `import.meta.url` is a `file://` URL; `argv[1]` is a filesystem path. `endsWith` produces false negatives on Windows (backslashes) and false positives on partial-path collisions (a tool importing this module could spuriously boot `runServer(productionDeps)`). Use `import { fileURLToPath } from 'node:url'; fileURLToPath(import.meta.url) === path.resolve(argv[1])` or compare via `pathToFileURL(argv[1]).href`.
+- [x] [Review][Patch] **`ctx.audit.write` during draining is fire-and-forget; can land in a closed stream** [`src/mcp/registry.ts:144-150`] — Wrapper writes audit synchronously when draining. New tool calls arriving during the post-`audit.close()` / pre-`server.close()` window write into a closed stream — possibly throws inside the SDK callback (no try/catch around `audit.write`) → escaped rejection. Either wrap the write in try/catch (log warn + continue), or have the audit logger no-op writes after close, or short-circuit draining without an audit write (tradeoff: AR53 "exactly one audit per call" gets a documented exception).
+
+**Patch — minor**
+
+- [x] [Review][Patch] **AC8: `transitionToServing()` missing `'starting'` precondition assertion** [`src/index.ts:171-173`] — Spec demands "assert current state is `'starting'`, set to `'serving'`." Impl blindly assigns. Add `if (state !== 'starting') throw new Error(...)` before assignment.
+- [x] [Review][Patch] **`details.code` of empty string falls through to default arm** [`src/index.ts:203,207`] — `typeof '' === 'string'` is true; switch matches no case. Treat empty string as undefined: `const code = typeof details['code'] === 'string' && details['code'] !== '' ? details['code'] : undefined;`
+- [x] [Review][Patch] **`scrubSecrets` fallback returns `'SilverBullet unreachable'` — duplicates the default-arm fatal** [`src/index.ts:279`] — Operator gets `FATAL: SilverBullet unreachable / hint: SilverBullet unreachable`. Return a distinct fallback (e.g., `'unable to render error details'`).
+- [x] [Review][Patch] **AC9 case #2 cold-start test should enable `mock.timers` per spec** [`tests/integration/startup-ladder.test.ts:328-337`] — Spec demands `mock.timers.enable({ apis: ['setTimeout', 'setImmediate'] })` plumbing around the ladder call. Test uses only `Date.now()`; the assertion is theatre on a synthetic ladder.
+- [x] [Review][Patch] **AC9 case #15 missing stack-trace + lifecycle-state assertions** [`tests/integration/startup-ladder.test.ts:625-635`] — Spec: assert `logger.error` line contains `'boom'` plus the stack; assert lifecycle state remains `'serving'`. Test asserts only `/uncaughtException: boom/` and `exitCalls.length === 0`.
+- [x] [Review][Patch] **No test for in-flight tool call that REJECTS during draining** [`tests/integration/startup-ladder.test.ts:532-575`] — Existing test exercises only the resolution path. Add a case where the tracked promise rejects during draining and assert exit code stays 0.
+- [x] [Review][Patch] **Audit-factory failure test should assert `audit.closes === 0`** [`tests/integration/startup-ladder.test.ts:2246`] — Future refactor opening the audit stream before factory-throw is checked would silently leak; the test currently won't catch it.
+- [x] [Review][Patch] **Test's module-scope `unhandledRejection` listener leaks across test files** [`tests/integration/startup-ladder.test.ts:1857-1860` of diff] — Persists for the runner's lifetime. Scope it via `before` / `after` hooks or `t.before` / `t.after` per test.
+- [x] [Review][Patch] **Verify AC11 manifest count** — Run `npm pack --dry-run` and confirm 29 files (28 → 29, the one new published file being `src/mcp/registry.ts`). No diff evidence in the commit.
+
+**Deferred**
+
+- [x] [Review][Defer] **`infrastructureError` may bury native errno on `client !response.ok` body-stream failure path** [`src/silverbullet/client.ts:226-244`] — pre-existing in story 1.7; outside scope of 1.11. Logged to `deferred-work.md`.
+
+**Dismissed (recorded for transparency)**
+
+- env-snapshot shallow freeze — correct via decoupling; the snapshot defends against transitive deps mutating `process.env` because the snapshot is decoupled.
+- `closeRuntime` empty stub — intentional seam per spec / `deferred-work.md` (lands when `AbortController` work arrives).
+- stdio close-then-end vs end-then-close ordering — idempotency guard (`shuttingDown` flag) handles both orderings identically.
+- `ProcessLike.off` interface field unused — deliberate structural typing of `process` (the runtime listeners persist for the single `runServer` lifetime).
+- `triggerExit` records only first exit code in `whenExited` — test harness detail; concrete test scenarios don't exercise the dual-exit path.
+- `let audit` declared without initializer — `fatalExit` is `never`-typed; TS soundness preserved.
 
 ## Dev Notes
 
