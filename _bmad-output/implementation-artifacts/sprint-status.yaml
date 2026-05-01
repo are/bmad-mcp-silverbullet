@@ -1,5 +1,5 @@
 # generated: 2026-04-30
-# last_updated: 2026-05-01 (stories 1.11 + 1.12 → done after code-review patches)
+# last_updated: 2026-05-01 (story 1.13 → done after code review)
 # project: bmad-silverbullet-mcp
 # project_key: NOKEY
 # tracking_system: file-system
@@ -55,7 +55,7 @@ development_status:
   1-10-read-side-tool-handlers-list-pages-search-pages-read-page: done
   1-11-startup-ladder-and-cooperative-shutdown: done
   1-12-ci-workflow-dependabot-and-stdio-discipline-smoke-test: done
-  1-13-user-documentation-readme-permissions-guide-threat-model: backlog
+  1-13-user-documentation-readme-permissions-guide-threat-model: done
   epic-1-retrospective: optional
   epic-2: backlog
   2-1-edit-batch-validator-pure: backlog
