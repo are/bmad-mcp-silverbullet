@@ -1,5 +1,5 @@
 # generated: 2026-04-30
-# last_updated: 2026-05-01 (story 1.13 → done after code review)
+# last_updated: 2026-05-01 (epic-1-retrospective → done)
 # project: bmad-silverbullet-mcp
 # project_key: NOKEY
 # tracking_system: file-system
@@ -56,7 +56,7 @@ development_status:
   1-11-startup-ladder-and-cooperative-shutdown: done
   1-12-ci-workflow-dependabot-and-stdio-discipline-smoke-test: done
   1-13-user-documentation-readme-permissions-guide-threat-model: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
   epic-2: backlog
   2-1-edit-batch-validator-pure: backlog
   2-2-append-to-page-handler: backlog
