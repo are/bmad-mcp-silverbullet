@@ -1,0 +1,46 @@
+# Team override for bmad-code-review.
+# Adds a commit-gate at workflow completion: if the review approved the
+# work but the working tree is still dirty, prompt for (and offer to
+# author) a commit so the next bmad-create-story run sees clean git
+# history when it scans recent commits for context.
+
+[workflow]
+
+on_complete = """
+COMMIT GATE — run after review findings and sprint status sync.
+
+1. Check the review verdict from this run.
+   - If the review reported blocking issues (story routed back to dev),
+     SKIP the gate. Tell the user: "Skipping commit-gate — fix the
+     blockers in dev-story, then re-run code-review." Exit.
+   - Otherwise (approved / no blockers), continue.
+
+2. Run `git status --porcelain`.
+   - Empty output → working tree clean. Tell the user: "Tree already
+     clean — nothing to commit." Exit.
+   - Non-empty → continue.
+
+3. Identify the story key for the commit subject:
+   - Prefer {story_key} if set during gather-context (e.g. "1-2-ref-domain-primitive").
+   - Otherwise derive from the spec file name or current branch.
+   - If no story context is available, ask the user for a short subject prefix.
+
+4. Draft a commit message:
+   - Subject: `<story-key>: <one-line summary of what the story delivered>`
+     (extract the summary from the story spec or recent diff — keep under 72 chars).
+   - Body: 1–3 bullets describing the change, drawn from the review's
+     "what changed" understanding. No filler.
+   - Trailer: include `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
+
+5. Show the user:
+   - The list of files to be staged (from `git status --porcelain`).
+   - The drafted commit message.
+   - Ask: "Commit now? [Y] yes / [E] edit message / [S] skip and let me handle it / [N] cancel"
+
+6. On Y: stage the listed files explicitly by path (never `git add -A` /
+   `git add .` — avoid sweeping in unrelated work or secrets), commit
+   with the drafted message via HEREDOC, then run `git status` to confirm.
+   On E: let the user revise, then commit. On S/N: exit without committing.
+
+7. Never push. Never amend. Never use `--no-verify`.
+"""

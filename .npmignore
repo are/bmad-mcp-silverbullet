@@ -1,0 +1,28 @@
+# Backstop only — package.json `files` allowlist is the primary mechanism (AR9).
+# Anything not in `files` is excluded; this list documents the intent.
+
+_bmad/
+_bmad-output/
+.claude/
+docs/
+tests/
+.github/
+node_modules/
+
+# configs
+tsconfig.json
+eslint.config.js
+.prettierrc.json
+.editorconfig
+.gitignore
+.npmignore
+
+# state
+audit.jsonl
+*.log
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db

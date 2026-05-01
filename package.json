@@ -1,0 +1,49 @@
+{
+  "name": "@are/mcp-silverbullet",
+  "version": "0.1.0-pre.0",
+  "description": "MCP server for SilverBullet — agents read and edit your notes under per-page permissions you declare in plain markdown.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "mcp-silverbullet": "./src/index.ts"
+  },
+  "files": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "node --watch ./src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'src/**/*.test.ts' 'tests/integration/**/*.test.ts'",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "npx --no-install lint-staged && npm run typecheck && npm test",
+    "pre-push": "node --test tests/smoke/stdout-discipline.test.ts"
+  },
+  "lint-staged": {
+    "*.{ts,js,json,md}": "prettier --check",
+    "*.ts": "eslint --max-warnings=0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24",
+    "eslint": "^10.2.1",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.3",
+    "simple-git-hooks": "^2.13.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.1"
+  }
+}
